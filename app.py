@@ -286,16 +286,33 @@ def fetch_tax_rates():
     label_cols = [c for c in df.columns if c not in skip and not pd.api.types.is_numeric_dtype(df[c])]
     sig = df[label_cols].astype(str).fillna("").agg(" | ".join, axis=1)
     sig_l = sig.str.lower()
-    mask = sig_l.str.contains("combined") & ~sig_l.str.contains("targeted|small|less|exclusive|surtax")
-    cand = df[mask].copy()
-    cand["_sig"] = sig[mask]
-    if cand.empty:
-        raise RuntimeError("No 'combined' statutory CIT series found in OECD data")
-    # choose the combined-rate series covering the most jurisdictions
-    best = cand.groupby("_sig")[area_code].nunique().sort_values(ascending=False).index[0]
-    cand = cand[cand["_sig"] == best].dropna(subset=[val_col])
-    cand[time_col] = pd.to_numeric(cand[time_col], errors="coerce")
+    df["_sig"] = sig
+    df["_val"] = pd.to_numeric(df[val_col], errors="coerce")
+    df[time_col] = pd.to_numeric(df[time_col].astype(str).str[:4], errors="coerce")
+    unit_col = next((c for c in df.columns if c.lower() in ("unit_measure", "unit of measure")), None)
+    # keep percentage rates only; drop targeted / small-business rates, thresholds and partial measures
+    bad = sig_l.str.contains("target|small|threshold|less deduction|exclusive|excl|sub-central|subcentral|sub_cent|"
+                             "sub-national|reduced|preferential|currency|national currency")
+    ok = ~bad & df["_val"].between(0, 60)
+    if unit_col is not None:
+        u = df[unit_col].astype(str).str.lower()
+        ok &= u.str.contains("pt|percent|%") | u.eq("nan")
+    pool = df[ok].dropna(subset=["_val", time_col])
+    if pool.empty:
+        raise RuntimeError("No usable CIT rate rows in OECD data. Columns: " + ", ".join(map(str, df.columns)))
+    comb = pool[pool["_sig"].str.lower().str.contains(r"combined|\bcomb")]
+    if not comb.empty:
+        best = comb.groupby("_sig")[area_code].nunique().sort_values(ascending=False).index[0]
+        cand = comb[comb["_sig"] == best]
+        series_note = best
+    else:
+        # combined (central + sub-central) is the highest standard statutory rate for each country-year
+        cand = pool.sort_values("_val").groupby([area_code, time_col]).tail(1)
+        series_note = "highest standard statutory CIT rate per country-year (= combined rate); series: " + \
+            "; ".join(pool["_sig"].value_counts().index[:4])
     cand = cand.sort_values(time_col).groupby(area_code).tail(1)
+    cand = cand.assign(**{val_col: cand["_val"]})
+    best = series_note
     out = pd.DataFrame({
         "Country": cand[area_name].astype(str).values,
         "ISO3": cand[area_code].astype(str).values,
@@ -600,7 +617,7 @@ with tab_res:
     st.subheader(f"{industry}  |  USD vs {fc_ccy} ({country})")
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("#### 🇺🇸 USD")
+        st.markdown("#### USD")
         m1, m2, m3 = st.columns(3)
         m1.metric("Cost of equity", pct(res["re_usd"]))
         m2.metric("Cost of debt (after tax)", pct(res["rd_usd_at"]))

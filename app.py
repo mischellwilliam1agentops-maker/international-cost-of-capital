@@ -290,26 +290,30 @@ def fetch_tax_rates():
     df["_val"] = pd.to_numeric(df[val_col], errors="coerce")
     df[time_col] = pd.to_numeric(df[time_col].astype(str).str[:4], errors="coerce")
     unit_col = next((c for c in df.columns if c.lower() in ("unit_measure", "unit of measure")), None)
-    # keep percentage rates only; drop targeted / small-business rates, thresholds and partial measures
-    bad = sig_l.str.contains("target|small|threshold|less deduction|exclusive|excl|sub-central|subcentral|sub_cent|"
-                             "sub-national|reduced|preferential|currency|national currency")
-    ok = ~bad & df["_val"].between(0, 60)
+    base = df.dropna(subset=["_val", time_col])
+    base = base[base["_val"].between(0, 60)]
     if unit_col is not None:
-        u = df[unit_col].astype(str).str.lower()
-        ok &= u.str.contains("pt|percent|%") | u.eq("nan")
-    pool = df[ok].dropna(subset=["_val", time_col])
-    if pool.empty:
-        raise RuntimeError("No usable CIT rate rows in OECD data. Columns: " + ", ".join(map(str, df.columns)))
-    comb = pool[pool["_sig"].str.lower().str.contains(r"combined|\bcomb")]
+        u = base[unit_col].astype(str).str.lower()
+        pct_rows = base[u.str.contains("pt|percent|%")]
+        if not pct_rows.empty:
+            base = pct_rows
+    if base.empty:
+        raise RuntimeError("No numeric rate rows in OECD data. Columns: " + ", ".join(map(str, df.columns)))
+    bl = base["_sig"].str.lower()
+    standard = base[~bl.str.contains("target|small|threshold")]
+    if standard.empty:
+        standard = base
+    sl = standard["_sig"].str.lower()
+    comb = standard[sl.str.contains("combined|comb_|_comb|central and sub|central plus sub|total")]
     if not comb.empty:
         best = comb.groupby("_sig")[area_code].nunique().sort_values(ascending=False).index[0]
         cand = comb[comb["_sig"] == best]
         series_note = best
     else:
-        # combined (central + sub-central) is the highest standard statutory rate for each country-year
-        cand = pool.sort_values("_val").groupby([area_code, time_col]).tail(1)
-        series_note = "highest standard statutory CIT rate per country-year (= combined rate); series: " + \
-            "; ".join(pool["_sig"].value_counts().index[:4])
+        # combined (central + sub-central) is the highest standard statutory rate in each country-year
+        cand = standard.sort_values("_val").groupby([area_code, time_col]).tail(1)
+        series_note = "highest standard statutory CIT rate per country-year (= combined rate). Series seen: " + \
+            " || ".join(standard["_sig"].value_counts().index[:4])
     cand = cand.sort_values(time_col).groupby(area_code).tail(1)
     cand = cand.assign(**{val_col: cand["_val"]})
     best = series_note
